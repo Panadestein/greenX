@@ -18,6 +18,9 @@ module minimax_grids
   use constants,         only: pi
   use minimax_tau,       only: get_points_weights_tau
   use minimax_omega,     only: get_points_weights_omega
+  use transform_types,   only: cosine_tw, cosine_wt, sine_tw,&
+                               psi_omega, psi_tau, mat_cos_tw,&
+                               mat_cos_wt, mat_sin_tw
 
   implicit none
 
@@ -25,6 +28,26 @@ module minimax_grids
 
   !> Main entry point for client code.
   public :: gx_minimax_grid, gx_minimax_grid_frequency
+
+  !> Generic procedures used in the transformations
+  abstract interface
+     function function_psi(w_or_t, arr)
+       use kinds, only: dp
+       real :: function_psi
+       real(dp), intent(in) :: w_or_t
+       real(dp), intent(in) :: arr
+     end function function_psi
+
+     function function_mat(w_or_t,  arr)
+       use kinds, only: dp
+       real :: function_mat
+       real(dp), intent(in) :: w_or_t
+       real(dp), intent(in) :: arr
+     end function function_mat
+  end interface
+
+  procedure(function_psi), pointer :: fptr_psi => null()
+  procedure(function_mat), pointer :: fptr_mat => null()
 
 contains
 
@@ -163,13 +186,13 @@ contains
     ! Internal variables
     real(kind=dp)                                     :: e_range, scaling
     real(kind=dp), dimension(:), allocatable          :: x_tw
-    
+
     ! Begin work
     e_range = e_max/e_min   
     ierr = 0
 
     ! Allocations
-    allocate (x_tw(2*num_points))
+    allocate (x_tw(2 * num_points))
     if (.not. allocated(omega_points)) then
        allocate (omega_points(num_points))
     end if
@@ -184,11 +207,11 @@ contains
     ! Scale the frequency grid points and weights from [1,R] to [e_min,e_max]
     ! Note: the frequency grid points and weights include a factor of two
     scaling = e_min
-    omega_points = x_tw(1: num_points) *scaling
-    omega_weights = x_tw(num_points+1: 2* num_points) *scaling
+    omega_points = x_tw(1 : num_points) * scaling
+    omega_weights = x_tw(num_points + 1 : 2 * num_points) *scaling
 
     deallocate (x_tw)
-    
+
   end subroutine gx_minimax_grid_frequency
 
 
@@ -344,17 +367,49 @@ contains
 
     ! Begin work
 
-    ! the cosine transform cos(it) -> cos(iw)
+    ! Cosine transform cos(it) -> cos(iw)
+    if (transformation_type == cosine_tw) then
+       fptr_psi => psi_omega
+       fptr_mat => mat_cos_tw
+       current_point = omega_points(i_point)
+       current_point_dual = tau_points
+    ! Cosine transform cos(iw) -> cos(it)  
+    else if (transformation_type == cosine_wt) then
+       fptr_psi => psi_tau
+       fptr_mat => mat_cos_wt
+       current_point = tau_points(i_point)
+       current_point_dual = tau_omega
+    ! Sine transform sin(it) -> sin(iw)         
+    else if (transformation_type == sine_tw) then
+       fptr_psi => psi_omega
+       fptr_mat => mat_sin_tw
+       current_point = omega_points(i_point)
+       current_point_dual = tau_points
+    end if
+
+    do i_node = 1, num_x_nodes
+       psi(i_node) = fptr_psi()
+          psi(i_node) = 2.0_dp*x_mu(i_node)/((x_mu(i_node))**2 + omega**2)
+          psi(i_node) = exp(-x_mu(i_node)*tau)
+          psi(i_node) = 2.0_dp*omega/((x_mu(i_node))**2 + omega**2)
+    end do
+
+    do j_point = 1, num_points
+       dual = current_point_dual(j_point)
+       do i_node = 1, num_x_nodes
+          mat_A(i_node, j_point) = fptr_mat()
+       end do
+    end do
+
+    
     if (transformation_type.eq.1) then
        omega = omega_points(i_point)
        current_point = omega
 
-       ! psi(omega_k,x) = 2x/(x^2+omega_k^2)
        do i_node = 1, num_x_nodes
           psi(i_node) = 2.0_dp*x_mu(i_node)/((x_mu(i_node))**2 + omega**2)
        end do
 
-       ! mat_A = cos(omega_k * tau) psi(tau,x)
        do j_point = 1, num_points
           tau = tau_points(j_point)
           do i_node = 1, num_x_nodes
@@ -362,17 +417,14 @@ contains
           end do
        end do
 
-    ! the cosine transform cos(iw) -> cos(it)  
     else if (transformation_type.eq.2) then
        tau = tau_points(i_point)
        current_point = tau
 
-       ! psi(tau_k,x) = =exp(-x*|tau_k|)
        do i_node = 1, num_x_nodes
           psi(i_node) = exp(-x_mu(i_node)*tau)
        end do
 
-       ! mat_A = cos(tau_k,omega) psi(omega,x)
        do j_point = 1, num_points
           omega = omega_points(j_point)
           do i_node = 1, num_x_nodes
@@ -380,17 +432,14 @@ contains
           end do
        end do
 
-    ! the sine transform sin(it) -> sin(iw)         
     else if (transformation_type.eq.3) then
        omega = omega_points(i_point)
        current_point = omega
 
-       ! psi(omega_k,x) = 2*omega_k/(x^2+omega_k^2)
        do i_node = 1, num_x_nodes
           psi(i_node) = 2.0_dp*omega/((x_mu(i_node))**2 + omega**2)
        end do
 
-       ! mat_A = sin(omega_k,tau)*phi(tau,x)
        do j_point = 1, num_points
           tau = tau_points(j_point)
           do i_node = 1, num_x_nodes
@@ -428,7 +477,7 @@ contains
     ! Internal variables
     integer                                          :: i_node,i_point
     real(kind=dp)                                    :: func_val, func_val_temp, max_error_tmp, &
-                                                        tau, omega, x_val
+         tau, omega, x_val
 
     ! Begin work
     max_error_tmp = 0.0_dp
@@ -451,7 +500,7 @@ contains
           end if
        end do
 
-    ! the cosine transform cos(iw) -> cos(it)
+       ! the cosine transform cos(iw) -> cos(it)
     else if (transformation_type.eq.2) then
        tau = current_point
 
@@ -470,7 +519,7 @@ contains
           end if
        end do
 
-    ! the sine transform sin(it) -> sin(iw)
+       ! the sine transform sin(it) -> sin(iw)
     else if (transformation_type.eq.3) then
        omega = current_point
 
